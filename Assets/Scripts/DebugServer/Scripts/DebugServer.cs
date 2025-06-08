@@ -10,6 +10,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System;
 using System.Linq;
+using Stopwatch = System.Diagnostics.Stopwatch;
 
 /// <summary>
 /// Unity App 内嵌 TCP 服务，仅在启用宏 INCLUDE_LOCAL_NETWORK_DEBUG 时启动
@@ -24,15 +25,17 @@ public class DebugServer : MonoBehaviour
     /// <summary>
     /// 简单的对象池实现
     /// </summary>
-    private class SimpleObjectPool<T> where T : new()
+    private class SimpleObjectPool<T> where T : class
     {
         private readonly ConcurrentQueue<T> pool = new ConcurrentQueue<T>();
         private readonly Action<T> onGet;
         private readonly Action<T> onRelease;
         private readonly int maxSize;
+        private readonly Func<T> createFunc;
 
-        public SimpleObjectPool(Action<T> onGet = null, Action<T> onRelease = null, int maxSize = 100)
+        public SimpleObjectPool(Func<T> createFunc, Action<T> onGet = null, Action<T> onRelease = null, int maxSize = 100)
         {
+            this.createFunc = createFunc;
             this.onGet = onGet;
             this.onRelease = onRelease;
             this.maxSize = maxSize;
@@ -45,7 +48,7 @@ public class DebugServer : MonoBehaviour
                 onGet?.Invoke(item);
                 return item;
             }
-            return new T();
+            return createFunc();
         }
 
         public void Release(T item)
@@ -56,17 +59,30 @@ public class DebugServer : MonoBehaviour
                 pool.Enqueue(item);
             }
         }
+
+        public int Count => pool.Count;
     }
 
     [Header("Server Settings")]
     [SerializeField] private int port = 9527;
     [SerializeField] private bool autoStart = true;
-    [SerializeField] private int maxConnections = 5;
-    [SerializeField] private int commandTimeout = 30; // 命令超时时间（秒）
-    [SerializeField] private int maxCommandLength = 1024; // 最大命令长度
+    [SerializeField] private int maxConnections = 3; // 降低最大连接数，因为这是调试工具
+    [SerializeField] private int commandTimeout = 60; // 增加超时时间，给调试更多时间
+    [SerializeField] private int maxCommandLength = 4096; // 增加命令长度限制，支持更长的调试命令
     [SerializeField] private string[] allowedIPs; // 允许连接的IP列表，为空则允许所有IP
     [SerializeField] private bool logCommands = true; // 是否在控制台输出命令
-    [SerializeField] private int maxCommandsPerFrame = 10; // 每帧最大处理命令数
+    [SerializeField] private int maxCommandsPerFrame = 5; // 降低每帧处理命令数，减少性能影响
+    [SerializeField] private int maxProcessingTimeMs = 200; // 增加处理时间限制，给复杂命令更多时间
+    [SerializeField] private int networkBufferSize = 4096; // 减小缓冲区大小，因为调试命令通常较小
+    [SerializeField] private int cleanupInterval = 5; // 增加清理间隔，减少清理频率
+    [SerializeField] private int maxCommandHistory = 20; // 减少历史记录数量，因为调试时通常不需要太多历史
+
+    [Header("Performance Settings")]
+    [SerializeField] private int minReadIntervalMs = 100; // 增加读取间隔，减少网络负载
+    [SerializeField] private int minCommandIntervalMs = 200; // 增加命令间隔，给系统更多处理时间
+    [SerializeField] private int uiUpdateIntervalMs = 1000; // 增加UI更新间隔，减少UI更新开销
+    [SerializeField] private bool enablePerformanceMonitoring = true; // 保持性能监控开启
+    [SerializeField] private int maxProcessingTimeSamples = 50; // 减少采样数量，因为调试时不需要太长的历史
 
     [Header("UI References")]
     [SerializeField] private TextMeshProUGUI debugText;
@@ -75,30 +91,147 @@ public class DebugServer : MonoBehaviour
     private TcpListener server;
     private Thread serverThread;
     private bool isRunning = false;
-    private readonly ConcurrentDictionary<string, DateTime> connectedClients = new ConcurrentDictionary<string, DateTime>();
+
+    // 字符串缓存
+    private static readonly Dictionary<string, string> stringCache = new Dictionary<string, string>();
+    private static readonly object stringCacheLock = new object();
+
+    /// <summary>
+    /// 获取缓存的字符串，避免重复创建
+    /// </summary>
+    private static string GetCachedString(string key)
+    {
+        if (string.IsNullOrEmpty(key)) return key;
+
+        lock (stringCacheLock)
+        {
+            if (stringCache.TryGetValue(key, out string cached))
+            {
+                return cached;
+            }
+
+            stringCache[key] = key;
+            return key;
+        }
+    }
+
+    /// <summary>
+    /// 清理字符串缓存
+    /// </summary>
+    private static void ClearStringCache()
+    {
+        lock (stringCacheLock)
+        {
+            stringCache.Clear();
+        }
+    }
+
+    /// <summary>
+    /// 客户端连接信息
+    /// </summary>
+    private class ClientConnection
+    {
+        public TcpClient Client { get; set; }
+        public DateTime LastActivity { get; set; }
+        public int CommandCount { get; set; }
+        public string EndPoint { get; set; }
+        private readonly int timeout;
+
+        public ClientConnection(int timeout)
+        {
+            this.timeout = timeout;
+            LastActivity = DateTime.Now;
+        }
+
+        public bool IsActive => (DateTime.Now - LastActivity).TotalSeconds < timeout;
+        public void UpdateActivity() => LastActivity = DateTime.Now;
+    }
+
+    private readonly ConcurrentDictionary<string, ClientConnection> connectedClients = 
+        new ConcurrentDictionary<string, ClientConnection>();
     private readonly ConcurrentQueue<DebugCommand> commandQueue = new ConcurrentQueue<DebugCommand>();
     private string currentCommand = "";
     private int pendingCommands = 0; // 待处理命令数
+    private readonly Stopwatch commandStopwatch = new Stopwatch();
 
     // 命令对象池
-    private readonly SimpleObjectPool<DebugCommand> commandPool = new SimpleObjectPool<DebugCommand>(
-        onGet: (cmd) => {
-            cmd.Command = null;
-            cmd.ClientInfo = null;
-            cmd.Timestamp = DateTime.Now;
-        },
-        onRelease: (cmd) => {
-            cmd.Command = null;
-            cmd.ClientInfo = null;
-        },
-        maxSize: 100
-    );
+    private SimpleObjectPool<DebugCommand> commandPool;
+    // 网络缓冲区池
+    private SimpleObjectPool<byte[]> bufferPool;
+    // 字符串构建器池
+    private SimpleObjectPool<StringBuilder> stringBuilderPool;
 
     // 事件系统
     public static event Action<string> OnCommandReceived;
     public static event Action<string> OnClientConnected;
     public static event Action<string> OnClientDisconnected;
     public static event Action<string> OnServerError;
+
+    // 性能监控
+    private class PerformanceStats
+    {
+        public int TotalCommands { get; set; }
+        public int CommandsThisSecond { get; set; }
+        public float AverageProcessingTime { get; set; }
+        public int PeakCommandsPerSecond { get; set; }
+        public DateTime LastResetTime { get; set; }
+        public readonly Queue<float> ProcessingTimes = new Queue<float>();
+        public readonly int MaxProcessingTimeSamples = 50; // 减少采样数量
+
+        public void AddProcessingTime(float time)
+        {
+            ProcessingTimes.Enqueue(time);
+            if (ProcessingTimes.Count > MaxProcessingTimeSamples)
+            {
+                ProcessingTimes.Dequeue();
+            }
+            AverageProcessingTime = ProcessingTimes.Average();
+        }
+
+        public void Reset()
+        {
+            CommandsThisSecond = 0;
+            LastResetTime = DateTime.Now;
+        }
+    }
+
+    private readonly PerformanceStats stats = new PerformanceStats();
+    private DateTime lastReadTime = DateTime.MinValue;
+    private DateTime lastCommandTime = DateTime.MinValue;
+    private DateTime lastUIUpdateTime = DateTime.MinValue;
+    private readonly Stopwatch frameStopwatch = new Stopwatch();
+
+    private void Awake()
+    {
+        // 初始化对象池
+        commandPool = new SimpleObjectPool<DebugCommand>(
+            createFunc: () => new DebugCommand(),
+            onGet: (cmd) => {
+                cmd.Command = null;
+                cmd.ClientInfo = null;
+                cmd.Timestamp = DateTime.Now;
+            },
+            onRelease: (cmd) => {
+                cmd.Command = null;
+                cmd.ClientInfo = null;
+            },
+            maxSize: 100
+        );
+
+        bufferPool = new SimpleObjectPool<byte[]>(
+            createFunc: () => new byte[networkBufferSize],
+            onGet: (buffer) => Array.Clear(buffer, 0, buffer.Length),
+            onRelease: (buffer) => Array.Clear(buffer, 0, buffer.Length),
+            maxSize: 50
+        );
+
+        stringBuilderPool = new SimpleObjectPool<StringBuilder>(
+            createFunc: () => new StringBuilder(),
+            onGet: (sb) => sb.Clear(),
+            onRelease: (sb) => sb.Clear(),
+            maxSize: 50
+        );
+    }
 
     private void Start()
     {
@@ -230,9 +363,15 @@ public class DebugServer : MonoBehaviour
 
     private void HandleClient(TcpClient client)
     {
-        string clientEndPoint = client.Client.RemoteEndPoint.ToString();
+        string clientEndPoint = GetCachedString(client.Client.RemoteEndPoint.ToString());
+        var connection = new ClientConnection(commandTimeout)
+        {
+            Client = client,
+            CommandCount = 0,
+            EndPoint = clientEndPoint
+        };
 
-        if (!connectedClients.TryAdd(clientEndPoint, DateTime.Now))
+        if (!connectedClients.TryAdd(clientEndPoint, connection))
         {
             client.Close();
             return;
@@ -244,26 +383,63 @@ public class DebugServer : MonoBehaviour
         {
             using (NetworkStream stream = client.GetStream())
             {
-                stream.ReadTimeout = commandTimeout * 1000; // 设置读取超时
-                byte[] buffer = new byte[maxCommandLength];
-                int bytesRead;
+                stream.ReadTimeout = commandTimeout * 1000;
+                var buffer = bufferPool.Get();
+                var commandBuilder = stringBuilderPool.Get();
 
-                while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                try
                 {
-                    string command = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-
-                    // 验证命令
-                    if (string.IsNullOrEmpty(command) || command.Length > maxCommandLength)
+                    int bytesRead;
+                    while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
                     {
-                        continue;
-                    }
+                        // 限制读取频率，使用更平滑的延迟
+                        var now = DateTime.Now;
+                        var timeSinceLastRead = (now - lastReadTime).TotalMilliseconds;
+                        if (timeSinceLastRead < minReadIntervalMs)
+                        {
+                            Thread.Sleep((int)(minReadIntervalMs - timeSinceLastRead));
+                        }
+                        lastReadTime = DateTime.Now;
 
-                    var debugCommand = commandPool.Get();
-                    debugCommand.Command = command;
-                    debugCommand.ClientInfo = clientEndPoint;
-                    commandQueue.Enqueue(debugCommand);
-                    pendingCommands++;
-                    OnCommandReceived?.Invoke(command);
+                        connection.UpdateActivity();
+                        commandBuilder.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+                        string command = commandBuilder.ToString().Trim();
+
+                        if (!string.IsNullOrEmpty(command))
+                        {
+                            if (command.Length <= maxCommandLength)
+                            {
+                                // 限制命令处理频率，使用更平滑的延迟
+                                now = DateTime.Now;
+                                var timeSinceLastCommand = (now - lastCommandTime).TotalMilliseconds;
+                                if (timeSinceLastCommand < minCommandIntervalMs)
+                                {
+                                    Thread.Sleep((int)(minCommandIntervalMs - timeSinceLastCommand));
+                                }
+                                lastCommandTime = DateTime.Now;
+
+                                var debugCommand = commandPool.Get();
+                                debugCommand.Command = GetCachedString(command);
+                                debugCommand.ClientInfo = clientEndPoint;
+                                commandQueue.Enqueue(debugCommand);
+                                pendingCommands++;
+                                connection.CommandCount++;
+                                stats.CommandsThisSecond++;
+                                stats.TotalCommands++;
+                                OnCommandReceived?.Invoke(command);
+                            }
+                            else
+                            {
+                                Debug.LogWarning($"Command too long from {clientEndPoint}: {command.Length} bytes");
+                            }
+                            commandBuilder.Clear();
+                        }
+                    }
+                }
+                finally
+                {
+                    bufferPool.Release(buffer);
+                    stringBuilderPool.Release(commandBuilder);
                 }
             }
         }
@@ -289,7 +465,10 @@ public class DebugServer : MonoBehaviour
             {
                 // 忽略关闭时的错误
             }
-            connectedClients.TryRemove(clientEndPoint, out _);
+            if (connectedClients.TryRemove(clientEndPoint, out var removedConnection))
+            {
+                Debug.Log($"Client {clientEndPoint} removed. Total commands: {removedConnection.CommandCount}");
+            }
             OnClientDisconnected?.Invoke(clientEndPoint);
         }
     }
@@ -300,44 +479,89 @@ public class DebugServer : MonoBehaviour
         {
             // 清理超时的连接
             var timeoutClients = connectedClients
-                .Where(kvp => (DateTime.Now - kvp.Value).TotalSeconds > commandTimeout)
+                .Where(kvp => !kvp.Value.IsActive)
                 .Select(kvp => kvp.Key)
                 .ToList();
 
             foreach (var client in timeoutClients)
             {
-                connectedClients.TryRemove(client, out _);
-                Debug.Log($"Removed timeout client: {client}");
+                if (connectedClients.TryRemove(client, out var connection))
+                {
+                    try
+                    {
+                        connection.Client.Close();
+                    }
+                    catch { }
+                    Debug.Log($"Removed timeout client: {client} (Commands: {connection.CommandCount})");
+                }
             }
 
-            yield return new WaitForSeconds(1f); // 每秒检查一次
+            yield return new WaitForSeconds(cleanupInterval);
         }
     }
 
     private void Update()
     {
-        // 批量处理命令，避免每帧处理过多命令
+        frameStopwatch.Restart();
+
+        // 更新性能统计
+        if (enablePerformanceMonitoring)
+        {
+            var now = DateTime.Now;
+            if ((now - stats.LastResetTime).TotalSeconds >= 1)
+            {
+                stats.PeakCommandsPerSecond = Math.Max(stats.PeakCommandsPerSecond, stats.CommandsThisSecond);
+                stats.Reset();
+            }
+        }
+
+        // 批量处理命令
         int processedCount = 0;
         while (commandQueue.TryDequeue(out DebugCommand command) && processedCount < maxCommandsPerFrame)
         {
             currentCommand = command.Command;
-            ProcessCommand(command);
-            commandPool.Release(command);
-            processedCount++;
+            if (ProcessCommandWithTimeout(command))
+            {
+                processedCount++;
+            }
             pendingCommands--;
         }
 
-        if (processedCount > 0)
+        // 限制UI更新频率
+        if (processedCount > 0 && (DateTime.Now - lastUIUpdateTime).TotalMilliseconds >= uiUpdateIntervalMs)
         {
             UpdateUI();
+            lastUIUpdateTime = DateTime.Now;
+        }
+
+        frameStopwatch.Stop();
+        if (enablePerformanceMonitoring)
+        {
+            stats.AddProcessingTime(frameStopwatch.ElapsedMilliseconds);
         }
     }
 
-    private void UpdateUI()
+    private bool ProcessCommandWithTimeout(DebugCommand command)
     {
-        if (debugText != null)
+        commandStopwatch.Restart();
+        try
         {
-            debugText.text = $"input: {currentCommand}\nPending Commands: {pendingCommands}";
+            ProcessCommand(command);
+            return true;
+        }
+        catch (Exception e)
+        {
+            HandleServerError($"Error processing command: {e.Message}");
+            return false;
+        }
+        finally
+        {
+            commandStopwatch.Stop();
+            if (commandStopwatch.ElapsedMilliseconds > maxProcessingTimeMs)
+            {
+                Debug.LogWarning($"Command processing took too long: {commandStopwatch.ElapsedMilliseconds}ms\nCommand: {command.Command}");
+            }
+            commandPool.Release(command);
         }
     }
 
@@ -348,14 +572,17 @@ public class DebugServer : MonoBehaviour
             Debug.Log($"[DebugServer] Command from {command.ClientInfo}: {command.Command}");
         }
 
-        // 这里可以添加更多命令处理逻辑
-        switch (command.Command.ToLower())
+        // 使用缓存的字符串进行比较
+        string cmd = command.Command.ToLower();
+        switch (GetCachedString(cmd))
         {
             case "help":
                 Debug.Log("[DebugServer] Available commands:\n" +
                          "help - Show this help message\n" +
                          "clear - Clear the console\n" +
-                         "clients - Show connected clients");
+                         "clients - Show connected clients\n" +
+                         "delay <ms> - Simulate command delay (for testing)\n" +
+                         "clearcache - Clear string cache");
                 break;
 
             case "clear":
@@ -363,9 +590,65 @@ public class DebugServer : MonoBehaviour
                 break;
 
             case "clients":
-                var clients = string.Join("\n", connectedClients.Keys);
+                var clients = string.Join("\n", connectedClients.Values.Select(c => 
+                    $"{c.EndPoint}: {c.CommandCount} commands, " +
+                    $"Last activity: {(DateTime.Now - c.LastActivity).TotalSeconds:F1}s ago"));
                 Debug.Log($"[DebugServer] Connected clients:\n{clients}");
                 break;
+
+            case "clearcache":
+                ClearStringCache();
+                Debug.Log("[DebugServer] String cache cleared");
+                break;
+
+            default:
+                if (cmd.StartsWith("delay "))
+                {
+                    if (int.TryParse(cmd.Substring(6), out int delayMs))
+                    {
+                        System.Threading.Thread.Sleep(delayMs);
+                    }
+                }
+                break;
+        }
+    }
+
+    private void UpdateUI()
+    {
+        if (debugText != null)
+        {
+            var sb = stringBuilderPool.Get();
+            try
+            {
+                sb.AppendLine($"input: {currentCommand}");
+                sb.AppendLine($"Pending Commands: {pendingCommands}");
+                sb.AppendLine($"Last Process Time: {commandStopwatch.ElapsedMilliseconds}ms");
+                sb.AppendLine($"Buffer Pool Size: {bufferPool.Count}");
+                sb.AppendLine($"StringBuilder Pool Size: {stringBuilderPool.Count}");
+                sb.AppendLine($"Connected Clients: {connectedClients.Count}");
+
+                if (enablePerformanceMonitoring)
+                {
+                    sb.AppendLine($"\nPerformance Stats:");
+                    sb.AppendLine($"Total Commands: {stats.TotalCommands}");
+                    sb.AppendLine($"Commands/Second: {stats.CommandsThisSecond}");
+                    sb.AppendLine($"Peak Commands/Second: {stats.PeakCommandsPerSecond}");
+                    sb.AppendLine($"Avg Process Time: {stats.AverageProcessingTime:F2}ms");
+                }
+
+                // 显示客户端详细信息
+                foreach (var client in connectedClients.Values)
+                {
+                    sb.AppendLine($"- {client.EndPoint}: {client.CommandCount} commands, " +
+                                $"Last activity: {(DateTime.Now - client.LastActivity).TotalSeconds:F1}s ago");
+                }
+
+                debugText.text = sb.ToString();
+            }
+            finally
+            {
+                stringBuilderPool.Release(sb);
+            }
         }
     }
 
@@ -378,6 +661,7 @@ public class DebugServer : MonoBehaviour
     private void OnDestroy()
     {
         StopServer();
+        ClearStringCache();
     }
 
     /// <summary>
