@@ -21,6 +21,43 @@ using System.Linq;
 public class DebugServer : MonoBehaviour
 {
 #if INCLUDE_LOCAL_NETWORK_DEBUG
+    /// <summary>
+    /// 简单的对象池实现
+    /// </summary>
+    private class SimpleObjectPool<T> where T : new()
+    {
+        private readonly ConcurrentQueue<T> pool = new ConcurrentQueue<T>();
+        private readonly Action<T> onGet;
+        private readonly Action<T> onRelease;
+        private readonly int maxSize;
+
+        public SimpleObjectPool(Action<T> onGet = null, Action<T> onRelease = null, int maxSize = 100)
+        {
+            this.onGet = onGet;
+            this.onRelease = onRelease;
+            this.maxSize = maxSize;
+        }
+
+        public T Get()
+        {
+            if (pool.TryDequeue(out T item))
+            {
+                onGet?.Invoke(item);
+                return item;
+            }
+            return new T();
+        }
+
+        public void Release(T item)
+        {
+            if (pool.Count < maxSize)
+            {
+                onRelease?.Invoke(item);
+                pool.Enqueue(item);
+            }
+        }
+    }
+
     [Header("Server Settings")]
     [SerializeField] private int port = 9527;
     [SerializeField] private bool autoStart = true;
@@ -40,6 +77,20 @@ public class DebugServer : MonoBehaviour
     private readonly ConcurrentDictionary<string, DateTime> connectedClients = new ConcurrentDictionary<string, DateTime>();
     private readonly ConcurrentQueue<DebugCommand> commandQueue = new ConcurrentQueue<DebugCommand>();
     private string currentCommand = "";
+
+    // 命令对象池
+    private readonly SimpleObjectPool<DebugCommand> commandPool = new SimpleObjectPool<DebugCommand>(
+        onGet: (cmd) => {
+            cmd.Command = null;
+            cmd.ClientInfo = null;
+            cmd.Timestamp = DateTime.Now;
+        },
+        onRelease: (cmd) => {
+            cmd.Command = null;
+            cmd.ClientInfo = null;
+        },
+        maxSize: 100
+    );
 
     // 事件系统
     public static event Action<string> OnCommandReceived;
@@ -118,7 +169,7 @@ public class DebugServer : MonoBehaviour
             {
                 TcpClient client = server.AcceptTcpClient();
                 string clientEndPoint = client.Client.RemoteEndPoint.ToString();
-                
+
                 // 检查IP是否允许连接
                 if (!IsIPAllowed(clientEndPoint))
                 {
@@ -178,7 +229,7 @@ public class DebugServer : MonoBehaviour
     private void HandleClient(TcpClient client)
     {
         string clientEndPoint = client.Client.RemoteEndPoint.ToString();
-        
+
         if (!connectedClients.TryAdd(clientEndPoint, DateTime.Now))
         {
             client.Close();
@@ -198,20 +249,16 @@ public class DebugServer : MonoBehaviour
                 while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
                 {
                     string command = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-                    
+
                     // 验证命令
                     if (string.IsNullOrEmpty(command) || command.Length > maxCommandLength)
                     {
                         continue;
                     }
 
-                    var debugCommand = new DebugCommand
-                    {
-                        Command = command,
-                        Timestamp = DateTime.Now,
-                        ClientInfo = clientEndPoint
-                    };
-                    
+                    var debugCommand = commandPool.Get();
+                    debugCommand.Command = command;
+                    debugCommand.ClientInfo = clientEndPoint;
                     commandQueue.Enqueue(debugCommand);
                     OnCommandReceived?.Invoke(command);
                 }
@@ -272,6 +319,7 @@ public class DebugServer : MonoBehaviour
             currentCommand = command.Command;
             UpdateUI();
             ProcessCommand(command);
+            commandPool.Release(command); // 处理完后释放回对象池
         }
     }
 
