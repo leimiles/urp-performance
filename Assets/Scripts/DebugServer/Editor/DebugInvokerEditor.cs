@@ -40,17 +40,37 @@ public class DebugInvokerEditor : Editor
                 new Rect(rect.x, y, rect.width, lineH), "调试命令", binding.commandName);
             y += lineH + spacing;
 
-            // 方法
+            // 方法分组与过滤
             if (binding.target != null)
             {
-                var allMethods = new List<MethodInfo>();
-                foreach (var comp in binding.target.GetComponents<MonoBehaviour>())
-                    allMethods.AddRange(comp.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly));
-                var methodSigs = allMethods.Select(DebugInvoker.GetMethodSignature).Distinct().ToArray();
-                int selected = Mathf.Max(0, Array.IndexOf(methodSigs, binding.methodSignature));
+                var allMethods = new List<(string group, string display, string signature, MethodInfo method)>();
+                foreach (var comp in binding.target.GetComponents<Component>())
+                {
+                    var compType = comp.GetType();
+                    // 只显示带[DebugCallable]且参数类型合规的方法
+                    var methods = compType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)
+                        .Where(m =>
+                            m.GetCustomAttribute(typeof(DebugCallableAttribute)) != null &&
+                            !m.IsSpecialName &&
+                            !m.IsGenericMethod &&
+                            m.GetParameters().All(p => IsSupportedType(p.ParameterType))
+                        )
+                        .ToArray();
+                    foreach (var m in methods)
+                    {
+                        string sig = DebugInvoker.GetMethodSignature(m);
+                        string display = $"{compType.Name}/{sig}";
+                        allMethods.Add((compType.Name, display, sig, m));
+                    }
+                }
+                var methodDisplays = allMethods.Select(x => x.display).ToArray();
+                int selected = Mathf.Max(0, Array.IndexOf(allMethods.Select(x => x.signature).ToArray(), binding.methodSignature));
                 selected = EditorGUI.Popup(
-                    new Rect(rect.x, y, rect.width, lineH), "方法", selected, methodSigs);
-                binding.methodSignature = methodSigs.Length > 0 ? methodSigs[selected] : "";
+                    new Rect(rect.x, y, rect.width, lineH), "方法", selected, methodDisplays);
+                if (allMethods.Count > 0)
+                {
+                    binding.methodSignature = allMethods[selected].signature;
+                }
             }
         };
         reorderableList.elementHeightCallback = (index) => {
@@ -70,6 +90,12 @@ public class DebugInvokerEditor : Editor
         serializedObject.Update();
         reorderableList.DoLayoutList();
         serializedObject.ApplyModifiedProperties();
+    }
+
+    private static bool IsSupportedType(Type t)
+    {
+        return t == typeof(int) || t == typeof(float) || t == typeof(string) || t == typeof(bool)
+            || t == typeof(int[]) || t == typeof(float[]) || t == typeof(string[]) || t == typeof(bool[]);
     }
 }
 #endif
