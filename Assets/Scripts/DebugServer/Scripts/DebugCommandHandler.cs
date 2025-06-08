@@ -54,6 +54,8 @@ namespace DebugServer
         public event Action<string> OnCommandProcessed;
         public event Action<string> OnCommandError;
 
+        private DebugInvoker debugInvoker;
+
         public DebugCommandHandler(int maxCommandHistory, int maxProcessingTimeMs, PerformanceStats stats)
         {
             this.maxCommandHistory = maxCommandHistory;
@@ -183,6 +185,11 @@ namespace DebugServer
             };
         }
 
+        public void SetInvoker(DebugInvoker invoker)
+        {
+            debugInvoker = invoker;
+        }
+
         /// <summary>
         /// 处理命令
         /// </summary>
@@ -219,6 +226,12 @@ namespace DebugServer
                 if (commandHandlers.TryGetValue(parameters.Command, out CommandAction handler))
                 {
                     handler(parameters, command);
+                    return true;
+                }
+
+                // 新增：尝试转发到 DebugInvoker
+                if (debugInvoker != null && debugInvoker.InvokeCommand(parameters.Command, parameters.Arguments))
+                {
                     return true;
                 }
 

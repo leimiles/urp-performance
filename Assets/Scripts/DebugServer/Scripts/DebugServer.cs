@@ -25,6 +25,7 @@ namespace DebugServer
     {
 #if INCLUDE_LOCAL_NETWORK_DEBUG
         [SerializeField] private DebugConfig config;
+        private DebugInvoker debugInvoker;
 
         // 网络管理器
         private DebugNetworkManager networkManager;
@@ -89,6 +90,14 @@ namespace DebugServer
                 config.maxProcessingTimeMs,
                 stats
             );
+
+            // 自动获取 DebugInvoker
+            debugInvoker = GetComponent<DebugInvoker>();
+            if (debugInvoker == null)
+            {
+                Debug.LogWarning("[DebugServer] DebugInvoker component not found on the same GameObject!");
+            }
+            commandHandler.SetInvoker(debugInvoker);
 
             // 获取UI管理器
             uiManager = GetComponent<DebugUI>();
