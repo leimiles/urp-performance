@@ -47,12 +47,14 @@ namespace DebugServer
 
         // 网络管理器
         private DebugNetworkManager networkManager;
+        
+        // 命令处理器
+        private DebugCommandHandler commandHandler;
 
         // 命令处理
         private string currentCommand = "";
         private int pendingCommands = 0;
         private readonly Stopwatch commandStopwatch = new Stopwatch();
-        private readonly Queue<DebugCommand> commandHistory = new Queue<DebugCommand>();
 
         // 对象池
         private SimpleObjectPool<DebugCommand> commandPool;
@@ -98,6 +100,17 @@ namespace DebugServer
                 minReadIntervalMs,
                 minCommandIntervalMs
             );
+
+            // 初始化命令处理器
+            commandHandler = new DebugCommandHandler(
+                maxCommandHistory,
+                maxProcessingTimeMs,
+                stats
+            );
+
+            // 注册命令处理器事件
+            commandHandler.OnCommandProcessed += HandleCommandProcessed;
+            commandHandler.OnCommandError += HandleCommandError;
 
             // 注册网络事件
             networkManager.OnClientConnected += HandleClientConnected;
@@ -177,8 +190,11 @@ namespace DebugServer
             commandStopwatch.Restart();
             try
             {
-                ProcessCommand(command);
-                return true;
+                if (logCommands)
+                {
+                    Debug.Log($"[DebugServer] Command from {command.ClientInfo}: {command.Command}");
+                }
+                return commandHandler.ProcessCommand(command);
             }
             catch (Exception e)
             {
@@ -188,66 +204,7 @@ namespace DebugServer
             finally
             {
                 commandStopwatch.Stop();
-                if (commandStopwatch.ElapsedMilliseconds > maxProcessingTimeMs)
-                {
-                    Debug.LogWarning($"Command processing took too long: {commandStopwatch.ElapsedMilliseconds}ms\nCommand: {command.Command}");
-                }
                 commandPool.Release(command);
-            }
-        }
-
-        private void ProcessCommand(DebugCommand command)
-        {
-            if (logCommands)
-            {
-                Debug.Log($"[DebugServer] Command from {command.ClientInfo}: {command.Command}");
-            }
-
-            // 添加到历史记录
-            commandHistory.Enqueue(command);
-            while (commandHistory.Count > maxCommandHistory)
-            {
-                commandHistory.Dequeue();
-            }
-
-            string cmd = command.Command.ToLower();
-            switch (cmd)
-            {
-                case "help":
-                    Debug.Log("[DebugServer] Available commands:\n" +
-                             "help - Show this help message\n" +
-                             "clear - Clear the console\n" +
-                             "clients - Show connected clients\n" +
-                             "delay <ms> - Simulate command delay (for testing)\n" +
-                             "history - Show command history");
-                    break;
-
-                case "clear":
-                    Debug.ClearDeveloperConsole();
-                    break;
-
-                case "clients":
-                    var clients = string.Join("\n", networkManager.GetConnectedClients().Select(c => 
-                        $"{c.EndPoint}: {c.CommandCount} commands, " +
-                        $"Last activity: {(DateTime.Now - c.LastActivity).TotalSeconds:F1}s ago"));
-                    Debug.Log($"[DebugServer] Connected clients:\n{clients}");
-                    break;
-
-                case "history":
-                    var history = string.Join("\n", commandHistory.Select(c => 
-                        $"[{c.Timestamp:HH:mm:ss}] {c.ClientInfo}: {c.Command}"));
-                    Debug.Log($"[DebugServer] Command history (last {commandHistory.Count} commands):\n{history}");
-                    break;
-
-                default:
-                    if (cmd.StartsWith("delay "))
-                    {
-                        if (int.TryParse(cmd.Substring(6), out int delayMs))
-                        {
-                            System.Threading.Thread.Sleep(delayMs);
-                        }
-                    }
-                    break;
             }
         }
 
@@ -262,7 +219,7 @@ namespace DebugServer
                     sb.AppendLine($"Pending Commands: {pendingCommands}");
                     sb.AppendLine($"Last Process Time: {commandStopwatch.ElapsedMilliseconds}ms");
                     sb.AppendLine($"Connected Clients: {networkManager.GetConnectedClientCount()}");
-                    sb.AppendLine($"Command History: {commandHistory.Count}/{maxCommandHistory}");
+                    sb.AppendLine($"Command History: {commandHandler.GetCommandHistory().Length}/{maxCommandHistory}");
 
                     if (enablePerformanceMonitoring)
                     {
@@ -309,6 +266,16 @@ namespace DebugServer
             pendingCommands++;
             stats.CommandsThisSecond++;
             stats.TotalCommands++;
+        }
+
+        private void HandleCommandProcessed(string message)
+        {
+            Debug.Log($"[DebugServer] {message}");
+        }
+
+        private void HandleCommandError(string error)
+        {
+            Debug.LogError($"[DebugServer] {error}");
         }
 
         private IEnumerator CleanupRoutine()
