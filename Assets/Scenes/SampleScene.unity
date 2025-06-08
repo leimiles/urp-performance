@@ -744,6 +744,16 @@ PrefabInstance:
       propertyPath: debugText
       value: 
       objectReference: {fileID: 21812596}
+    - target: {fileID: 1013477964010939508, guid: 5c3f912d592eb1e43a3d4be3b49f3d6c,
+        type: 3}
+      propertyPath: clientsText
+      value: 
+      objectReference: {fileID: 0}
+    - target: {fileID: 1013477964010939508, guid: 5c3f912d592eb1e43a3d4be3b49f3d6c,
+        type: 3}
+      propertyPath: commandHistoryText
+      value: 
+      objectReference: {fileID: 21812596}
     - target: {fileID: 1542925451365299517, guid: 5c3f912d592eb1e43a3d4be3b49f3d6c,
         type: 3}
       propertyPath: m_Name

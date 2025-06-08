@@ -75,14 +75,13 @@ public class DebugServer : MonoBehaviour
     [SerializeField] private int maxProcessingTimeMs = 200; // 增加处理时间限制，给复杂命令更多时间
     [SerializeField] private int networkBufferSize = 4096; // 减小缓冲区大小，因为调试命令通常较小
     [SerializeField] private int cleanupInterval = 5; // 增加清理间隔，减少清理频率
-    [SerializeField] private int maxCommandHistory = 20; // 减少历史记录数量，因为调试时通常不需要太多历史
+    [SerializeField] private int maxCommandHistory = 8; // 减少历史记录数量，因为调试时通常不需要太多历史
 
     [Header("Performance Settings")]
     [SerializeField] private int minReadIntervalMs = 100; // 增加读取间隔，减少网络负载
     [SerializeField] private int minCommandIntervalMs = 200; // 增加命令间隔，给系统更多处理时间
     [SerializeField] private int uiUpdateIntervalMs = 1000; // 增加UI更新间隔，减少UI更新开销
     [SerializeField] private bool enablePerformanceMonitoring = true; // 保持性能监控开启
-    [SerializeField] private int maxProcessingTimeSamples = 50; // 减少采样数量，因为调试时不需要太长的历史
 
     [Header("UI References")]
     [SerializeField] private TextMeshProUGUI debugText;
@@ -200,6 +199,9 @@ public class DebugServer : MonoBehaviour
     private DateTime lastCommandTime = DateTime.MinValue;
     private DateTime lastUIUpdateTime = DateTime.MinValue;
     private readonly Stopwatch frameStopwatch = new Stopwatch();
+
+    // 命令历史记录
+    private readonly Queue<DebugCommand> commandHistory = new Queue<DebugCommand>();
 
     private void Awake()
     {
@@ -572,6 +574,13 @@ public class DebugServer : MonoBehaviour
             Debug.Log($"[DebugServer] Command from {command.ClientInfo}: {command.Command}");
         }
 
+        // 添加到历史记录
+        commandHistory.Enqueue(command);
+        while (commandHistory.Count > maxCommandHistory)
+        {
+            commandHistory.Dequeue();
+        }
+
         // 使用缓存的字符串进行比较
         string cmd = command.Command.ToLower();
         switch (GetCachedString(cmd))
@@ -582,7 +591,8 @@ public class DebugServer : MonoBehaviour
                          "clear - Clear the console\n" +
                          "clients - Show connected clients\n" +
                          "delay <ms> - Simulate command delay (for testing)\n" +
-                         "clearcache - Clear string cache");
+                         "clearcache - Clear string cache\n" +
+                         "history - Show command history");
                 break;
 
             case "clear":
@@ -599,6 +609,12 @@ public class DebugServer : MonoBehaviour
             case "clearcache":
                 ClearStringCache();
                 Debug.Log("[DebugServer] String cache cleared");
+                break;
+
+            case "history":
+                var history = string.Join("\n", commandHistory.Select(c => 
+                    $"[{c.Timestamp:HH:mm:ss}] {c.ClientInfo}: {c.Command}"));
+                Debug.Log($"[DebugServer] Command history (last {commandHistory.Count} commands):\n{history}");
                 break;
 
             default:
@@ -626,6 +642,7 @@ public class DebugServer : MonoBehaviour
                 sb.AppendLine($"Buffer Pool Size: {bufferPool.Count}");
                 sb.AppendLine($"StringBuilder Pool Size: {stringBuilderPool.Count}");
                 sb.AppendLine($"Connected Clients: {connectedClients.Count}");
+                sb.AppendLine($"Command History: {commandHistory.Count}/{maxCommandHistory}");
 
                 if (enablePerformanceMonitoring)
                 {
