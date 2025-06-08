@@ -6,6 +6,10 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using TMPro;
+using System.Collections.Concurrent;
+using System.IO;
+using System;
+using System.Linq;
 
 /// <summary>
 /// Unity App 内嵌 TCP 服务，仅在启用宏 INCLUDE_LOCAL_NETWORK_DEBUG 时启动
@@ -17,21 +21,51 @@ using TMPro;
 public class DebugServer : MonoBehaviour
 {
 #if INCLUDE_LOCAL_NETWORK_DEBUG
+    [Header("Server Settings")]
     [SerializeField] private int port = 9527;
-    [SerializeField] private TextMeshProUGUI debugText; // 用于显示调试信息的UI文本组件
+    [SerializeField] private bool autoStart = true;
+    [SerializeField] private int maxConnections = 5;
+    [SerializeField] private int commandTimeout = 30; // 命令超时时间（秒）
+    [SerializeField] private int maxCommandLength = 1024; // 最大命令长度
+    [SerializeField] private string[] allowedIPs; // 允许连接的IP列表，为空则允许所有IP
+    [SerializeField] private bool logCommands = true; // 是否在控制台输出命令
 
+    [Header("UI References")]
+    [SerializeField] private TextMeshProUGUI debugText;
+
+    // 服务器状态
     private TcpListener server;
     private Thread serverThread;
     private bool isRunning = false;
-    private string receivedCommand = "";
+    private readonly ConcurrentDictionary<string, DateTime> connectedClients = new ConcurrentDictionary<string, DateTime>();
+    private readonly ConcurrentQueue<DebugCommand> commandQueue = new ConcurrentQueue<DebugCommand>();
+    private string currentCommand = "";
+
+    // 事件系统
+    public static event Action<string> OnCommandReceived;
+    public static event Action<string> OnClientConnected;
+    public static event Action<string> OnClientDisconnected;
+    public static event Action<string> OnServerError;
 
     private void Start()
     {
-        StartServer();
+        if (autoStart)
+        {
+            StartServer();
+        }
     }
 
-    private void StartServer()
+    /// <summary>
+    /// 启动调试服务器
+    /// </summary>
+    public void StartServer()
     {
+        if (isRunning)
+        {
+            Debug.LogWarning("Debug server is already running.");
+            return;
+        }
+
         try
         {
             server = new TcpListener(IPAddress.Any, port);
@@ -42,11 +76,37 @@ public class DebugServer : MonoBehaviour
             serverThread.IsBackground = true;
             serverThread.Start();
 
+            // 启动清理线程
+            StartCoroutine(CleanupRoutine());
+
             Debug.Log($"Debug Server started on port {port}");
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
-            Debug.LogError($"Failed to start debug server: {e.Message}");
+            HandleServerError($"Failed to start debug server: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 停止调试服务器
+    /// </summary>
+    public void StopServer()
+    {
+        if (!isRunning)
+        {
+            return;
+        }
+
+        isRunning = false;
+        try
+        {
+            server?.Stop();
+            serverThread?.Join(1000);
+            connectedClients.Clear();
+        }
+        catch (Exception e)
+        {
+            HandleServerError($"Error stopping server: {e.Message}");
         }
     }
 
@@ -57,62 +117,219 @@ public class DebugServer : MonoBehaviour
             try
             {
                 TcpClient client = server.AcceptTcpClient();
-                HandleClient(client);
+                string clientEndPoint = client.Client.RemoteEndPoint.ToString();
+                
+                // 检查IP是否允许连接
+                if (!IsIPAllowed(clientEndPoint))
+                {
+                    Debug.LogWarning($"Blocked connection from unauthorized IP: {clientEndPoint}");
+                    client.Close();
+                    continue;
+                }
+
+                // 检查连接数量限制
+                if (connectedClients.Count >= maxConnections)
+                {
+                    Debug.LogWarning($"Connection limit reached. Rejected connection from: {clientEndPoint}");
+                    client.Close();
+                    continue;
+                }
+
+                // 在新线程中处理客户端连接
+                Thread clientThread = new Thread(() => HandleClient(client));
+                clientThread.IsBackground = true;
+                clientThread.Start();
             }
-            catch (System.Exception e)
+            catch (SocketException e)
             {
                 if (isRunning)
                 {
-                    Debug.LogError($"Error accepting client: {e.Message}");
+                    if (e.SocketErrorCode == SocketError.Interrupted)
+                    {
+                        Debug.Log("Debug server stopped.");
+                    }
+                    else
+                    {
+                        HandleServerError($"Socket error: {e.Message}");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                if (isRunning)
+                {
+                    HandleServerError($"Error accepting client: {e.Message}");
                 }
             }
         }
     }
 
+    private bool IsIPAllowed(string clientEndPoint)
+    {
+        if (allowedIPs == null || allowedIPs.Length == 0)
+        {
+            return true; // 如果没有设置允许的IP，则允许所有连接
+        }
+
+        string clientIP = clientEndPoint.Split(':')[0];
+        return allowedIPs.Contains(clientIP);
+    }
+
     private void HandleClient(TcpClient client)
     {
+        string clientEndPoint = client.Client.RemoteEndPoint.ToString();
+        
+        if (!connectedClients.TryAdd(clientEndPoint, DateTime.Now))
+        {
+            client.Close();
+            return;
+        }
+
+        OnClientConnected?.Invoke(clientEndPoint);
+
         try
         {
-            NetworkStream stream = client.GetStream();
-            byte[] buffer = new byte[1024];
-            int bytesRead;
-
-            while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+            using (NetworkStream stream = client.GetStream())
             {
-                string command = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                receivedCommand = command.Trim();
-                Debug.Log($"Received command: {receivedCommand}");
+                stream.ReadTimeout = commandTimeout * 1000; // 设置读取超时
+                byte[] buffer = new byte[maxCommandLength];
+                int bytesRead;
+
+                while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    string command = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                    
+                    // 验证命令
+                    if (string.IsNullOrEmpty(command) || command.Length > maxCommandLength)
+                    {
+                        continue;
+                    }
+
+                    var debugCommand = new DebugCommand
+                    {
+                        Command = command,
+                        Timestamp = DateTime.Now,
+                        ClientInfo = clientEndPoint
+                    };
+                    
+                    commandQueue.Enqueue(debugCommand);
+                    OnCommandReceived?.Invoke(command);
+                }
             }
         }
-        catch (System.Exception e)
+        catch (IOException)
         {
-            Debug.LogError($"Error handling client: {e.Message}");
+            Debug.Log($"Client {clientEndPoint} disconnected.");
+        }
+        catch (SocketException)
+        {
+            Debug.Log($"Client {clientEndPoint} disconnected.");
+        }
+        catch (Exception e)
+        {
+            HandleServerError($"Error handling client {clientEndPoint}: {e.Message}");
         }
         finally
         {
-            client.Close();
+            try
+            {
+                client.Close();
+            }
+            catch
+            {
+                // 忽略关闭时的错误
+            }
+            connectedClients.TryRemove(clientEndPoint, out _);
+            OnClientDisconnected?.Invoke(clientEndPoint);
+        }
+    }
+
+    private IEnumerator CleanupRoutine()
+    {
+        while (isRunning)
+        {
+            // 清理超时的连接
+            var timeoutClients = connectedClients
+                .Where(kvp => (DateTime.Now - kvp.Value).TotalSeconds > commandTimeout)
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var client in timeoutClients)
+            {
+                connectedClients.TryRemove(client, out _);
+                Debug.Log($"Removed timeout client: {client}");
+            }
+
+            yield return new WaitForSeconds(1f); // 每秒检查一次
         }
     }
 
     private void Update()
     {
-        if (!string.IsNullOrEmpty(receivedCommand) && debugText != null)
+        // 在主线程中处理命令队列
+        while (commandQueue.TryDequeue(out DebugCommand command))
         {
-            debugText.text = $"input: {receivedCommand}";
+            currentCommand = command.Command;
+            UpdateUI();
+            ProcessCommand(command);
         }
+    }
+
+    private void UpdateUI()
+    {
+        if (debugText != null)
+        {
+            debugText.text = $"input: {currentCommand}";
+        }
+    }
+
+    private void ProcessCommand(DebugCommand command)
+    {
+        if (logCommands)
+        {
+            Debug.Log($"[DebugServer] Command from {command.ClientInfo}: {command.Command}");
+        }
+
+        // 这里可以添加更多命令处理逻辑
+        switch (command.Command.ToLower())
+        {
+            case "help":
+                Debug.Log("[DebugServer] Available commands:\n" +
+                         "help - Show this help message\n" +
+                         "clear - Clear the console\n" +
+                         "clients - Show connected clients");
+                break;
+
+            case "clear":
+                Debug.ClearDeveloperConsole();
+                break;
+
+            case "clients":
+                var clients = string.Join("\n", connectedClients.Keys);
+                Debug.Log($"[DebugServer] Connected clients:\n{clients}");
+                break;
+        }
+    }
+
+    private void HandleServerError(string errorMessage)
+    {
+        Debug.LogError(errorMessage);
+        OnServerError?.Invoke(errorMessage);
     }
 
     private void OnDestroy()
     {
-        isRunning = false;
-        if (server != null)
-        {
-            server.Stop();
-        }
-        if (serverThread != null)
-        {
-            serverThread.Join();
-        }
+        StopServer();
+    }
+
+    /// <summary>
+    /// 调试命令数据结构
+    /// </summary>
+    private class DebugCommand
+    {
+        public string Command { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string ClientInfo { get; set; }
     }
 #endif
-} 
+}
