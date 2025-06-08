@@ -98,7 +98,7 @@ public class DebugServer : MonoBehaviour
     {
         if (!string.IsNullOrEmpty(receivedCommand) && debugText != null)
         {
-            debugText.text = $"Last received command: {receivedCommand}";
+            debugText.text = $"input: {receivedCommand}";
         }
     }
 
