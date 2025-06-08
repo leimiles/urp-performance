@@ -10,6 +10,8 @@ using System.Linq;
 using Stopwatch = System.Diagnostics.Stopwatch;
 using DebugServer.Models;
 using DebugServer.Pooling;
+using DebugServer.UI;
+using DebugServer.Config;
 
 namespace DebugServer
 {
@@ -22,34 +24,16 @@ namespace DebugServer
     public class DebugServer : MonoBehaviour
     {
 #if INCLUDE_LOCAL_NETWORK_DEBUG
-        [Header("Server Settings")]
-        [SerializeField] private int port = 9527;
-        [SerializeField] private bool autoStart = true;
-        [SerializeField] private int maxConnections = 3;
-        [SerializeField] private int commandTimeout = 60;
-        [SerializeField] private int maxCommandLength = 4096;
-        [SerializeField] private string[] allowedIPs;
-        [SerializeField] private bool logCommands = true;
-        [SerializeField] private int maxCommandsPerFrame = 5;
-        [SerializeField] private int maxProcessingTimeMs = 200;
-        [SerializeField] private int networkBufferSize = 4096;
-        [SerializeField] private int cleanupInterval = 5;
-        [SerializeField] private int maxCommandHistory = 20;
-
-        [Header("Performance Settings")]
-        [SerializeField] private int minReadIntervalMs = 100;
-        [SerializeField] private int minCommandIntervalMs = 200;
-        [SerializeField] private int uiUpdateIntervalMs = 1000;
-        [SerializeField] private bool enablePerformanceMonitoring = true;
-
-        [Header("UI References")]
-        [SerializeField] private TextMeshProUGUI debugText;
+        [SerializeField] private DebugConfig config;
 
         // 网络管理器
         private DebugNetworkManager networkManager;
         
         // 命令处理器
         private DebugCommandHandler commandHandler;
+
+        // UI管理器
+        private DebugUI uiManager;
 
         // 命令处理
         private string currentCommand = "";
@@ -58,15 +42,20 @@ namespace DebugServer
 
         // 对象池
         private SimpleObjectPool<DebugCommand> commandPool;
-        private SimpleObjectPool<StringBuilder> stringBuilderPool;
 
         // 性能统计
         private readonly PerformanceStats stats = new PerformanceStats();
-        private DateTime lastUIUpdateTime = DateTime.MinValue;
         private readonly Stopwatch frameStopwatch = new Stopwatch();
 
         private void Awake()
         {
+            // 加载配置
+            if (config == null)
+            {
+                config = DebugConfig.Instance;
+            }
+            config.Validate();
+
             // 初始化对象池
             commandPool = ObjectPoolManager.GetPool<DebugCommand>(
                 createFunc: () => new DebugCommand(),
@@ -82,31 +71,31 @@ namespace DebugServer
                 maxSize: 100
             );
 
-            stringBuilderPool = ObjectPoolManager.GetPool<StringBuilder>(
-                createFunc: () => new StringBuilder(),
-                onGet: (sb) => sb.Clear(),
-                onRelease: (sb) => sb.Clear(),
-                maxSize: 50
-            );
-
             // 初始化网络管理器
             networkManager = new DebugNetworkManager(
-                port,
-                maxConnections,
-                commandTimeout,
-                maxCommandLength,
-                allowedIPs,
-                networkBufferSize,
-                minReadIntervalMs,
-                minCommandIntervalMs
+                config.port,
+                config.maxConnections,
+                config.commandTimeout,
+                config.maxCommandLength,
+                config.allowedIPs,
+                config.networkBufferSize,
+                config.minReadIntervalMs,
+                config.minCommandIntervalMs
             );
 
             // 初始化命令处理器
             commandHandler = new DebugCommandHandler(
-                maxCommandHistory,
-                maxProcessingTimeMs,
+                config.maxCommandHistory,
+                config.maxProcessingTimeMs,
                 stats
             );
+
+            // 获取UI管理器
+            uiManager = GetComponent<DebugUI>();
+            if (uiManager == null)
+            {
+                Debug.LogWarning("[DebugServer] DebugUI component not found!");
+            }
 
             // 注册命令处理器事件
             commandHandler.OnCommandProcessed += HandleCommandProcessed;
@@ -121,7 +110,7 @@ namespace DebugServer
 
         private void Start()
         {
-            if (autoStart)
+            if (config.autoStart)
             {
                 StartServer();
             }
@@ -149,7 +138,7 @@ namespace DebugServer
             frameStopwatch.Restart();
 
             // 更新性能统计
-            if (enablePerformanceMonitoring)
+            if (config.enablePerformanceMonitoring)
             {
                 var now = DateTime.Now;
                 if ((now - stats.LastResetTime).TotalSeconds >= 1)
@@ -161,7 +150,7 @@ namespace DebugServer
 
             // 批量处理命令
             int processedCount = 0;
-            while (networkManager.TryDequeueCommand(out DebugCommand command) && processedCount < maxCommandsPerFrame)
+            while (networkManager.TryDequeueCommand(out DebugCommand command) && processedCount < config.maxCommandsPerFrame)
             {
                 currentCommand = command.Command;
                 if (ProcessCommandWithTimeout(command))
@@ -171,15 +160,23 @@ namespace DebugServer
                 pendingCommands--;
             }
 
-            // 限制UI更新频率
-            if (processedCount > 0 && (DateTime.Now - lastUIUpdateTime).TotalMilliseconds >= uiUpdateIntervalMs)
+            // 更新UI
+            if (uiManager != null)
             {
-                UpdateUI();
-                lastUIUpdateTime = DateTime.Now;
+                uiManager.UpdateUI(
+                    currentCommand,
+                    pendingCommands,
+                    commandStopwatch.ElapsedMilliseconds,
+                    networkManager.GetConnectedClientCount(),
+                    commandHandler.GetCommandHistory().Length,
+                    config.maxCommandHistory,
+                    stats,
+                    networkManager.GetConnectedClients()
+                );
             }
 
             frameStopwatch.Stop();
-            if (enablePerformanceMonitoring)
+            if (config.enablePerformanceMonitoring)
             {
                 stats.AddProcessingTime(frameStopwatch.ElapsedMilliseconds);
             }
@@ -190,7 +187,7 @@ namespace DebugServer
             commandStopwatch.Restart();
             try
             {
-                if (logCommands)
+                if (config.logCommands)
                 {
                     Debug.Log($"[DebugServer] Command from {command.ClientInfo}: {command.Command}");
                 }
@@ -208,57 +205,22 @@ namespace DebugServer
             }
         }
 
-        private void UpdateUI()
-        {
-            if (debugText != null)
-            {
-                var sb = stringBuilderPool.Get();
-                try
-                {
-                    sb.AppendLine($"input: {currentCommand}");
-                    sb.AppendLine($"Pending Commands: {pendingCommands}");
-                    sb.AppendLine($"Last Process Time: {commandStopwatch.ElapsedMilliseconds}ms");
-                    sb.AppendLine($"Connected Clients: {networkManager.GetConnectedClientCount()}");
-                    sb.AppendLine($"Command History: {commandHandler.GetCommandHistory().Length}/{maxCommandHistory}");
-
-                    if (enablePerformanceMonitoring)
-                    {
-                        sb.AppendLine($"\nPerformance Stats:");
-                        sb.AppendLine($"Total Commands: {stats.TotalCommands}");
-                        sb.AppendLine($"Commands/Second: {stats.CommandsThisSecond}");
-                        sb.AppendLine($"Peak Commands/Second: {stats.PeakCommandsPerSecond}");
-                        sb.AppendLine($"Avg Process Time: {stats.AverageProcessingTime:F2}ms");
-                    }
-
-                    // 显示客户端详细信息
-                    foreach (var client in networkManager.GetConnectedClients())
-                    {
-                        sb.AppendLine($"- {client.EndPoint}: {client.CommandCount} commands, " +
-                                    $"Last activity: {(DateTime.Now - client.LastActivity).TotalSeconds:F1}s ago");
-                    }
-
-                    debugText.text = sb.ToString();
-                }
-                finally
-                {
-                    stringBuilderPool.Release(sb);
-                }
-            }
-        }
-
         private void HandleClientConnected(string clientEndPoint)
         {
             Debug.Log($"Client connected: {clientEndPoint}");
+            uiManager?.ShowSuccess($"Client connected: {clientEndPoint}");
         }
 
         private void HandleClientDisconnected(string clientEndPoint)
         {
             Debug.Log($"Client disconnected: {clientEndPoint}");
+            uiManager?.ShowSuccess($"Client disconnected: {clientEndPoint}");
         }
 
         private void HandleServerError(string errorMessage)
         {
             Debug.LogError(errorMessage);
+            uiManager?.ShowError(errorMessage);
         }
 
         private void HandleCommandReceived(DebugCommand command)
@@ -271,11 +233,13 @@ namespace DebugServer
         private void HandleCommandProcessed(string message)
         {
             Debug.Log($"[DebugServer] {message}");
+            uiManager?.ShowSuccess(message);
         }
 
         private void HandleCommandError(string error)
         {
             Debug.LogError($"[DebugServer] {error}");
+            uiManager?.ShowError(error);
         }
 
         private IEnumerator CleanupRoutine()
@@ -283,7 +247,7 @@ namespace DebugServer
             while (true)
             {
                 networkManager.CleanupTimeoutConnections();
-                yield return new WaitForSeconds(cleanupInterval);
+                yield return new WaitForSeconds(config.cleanupInterval);
             }
         }
 

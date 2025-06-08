@@ -10,6 +10,7 @@ GameObject:
   m_Component:
   - component: {fileID: 917142385080976655}
   - component: {fileID: 1013477964010939508}
+  - component: {fileID: 6259552967715122603}
   m_Layer: 0
   m_Name: DebugServer
   m_TagString: Untagged
@@ -44,5 +45,25 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b73cae83164e3b6469afbc75f5dcf17b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  port: 9527
+  config: {fileID: 11400000, guid: 3882abd9039b6dc48b25a545ab4cb098, type: 2}
+--- !u!114 &6259552967715122603
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1542925451365299517}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7fbaa2fdf07d0cc42bd90fe8f5d6432f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
   debugText: {fileID: 0}
+  commandHistoryText: {fileID: 0}
+  clientListText: {fileID: 0}
+  performanceStatsText: {fileID: 0}
+  uiUpdateIntervalMs: 1000
+  maxHistoryLines: 10
+  showPerformanceStats: 1
+  showClientList: 1
+  showCommandHistory: 1

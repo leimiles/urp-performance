@@ -1,0 +1,34 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f4284085ebb98764e874c8053e2dd3f9, type: 3}
+  m_Name: DebugServerConfig
+  m_EditorClassIdentifier: 
+  port: 9527
+  autoStart: 1
+  maxConnections: 3
+  commandTimeout: 60
+  maxCommandLength: 4096
+  allowedIPs: []
+  logCommands: 1
+  maxCommandsPerFrame: 5
+  maxProcessingTimeMs: 200
+  networkBufferSize: 4096
+  cleanupInterval: 5
+  maxCommandHistory: 20
+  minReadIntervalMs: 100
+  minCommandIntervalMs: 200
+  enablePerformanceMonitoring: 1
+  uiUpdateIntervalMs: 1000
+  maxHistoryLines: 10
+  showPerformanceStats: 1
+  showClientList: 1
+  showCommandHistory: 1
