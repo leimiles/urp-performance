@@ -66,6 +66,7 @@ public class DebugServer : MonoBehaviour
     [SerializeField] private int maxCommandLength = 1024; // 最大命令长度
     [SerializeField] private string[] allowedIPs; // 允许连接的IP列表，为空则允许所有IP
     [SerializeField] private bool logCommands = true; // 是否在控制台输出命令
+    [SerializeField] private int maxCommandsPerFrame = 10; // 每帧最大处理命令数
 
     [Header("UI References")]
     [SerializeField] private TextMeshProUGUI debugText;
@@ -77,6 +78,7 @@ public class DebugServer : MonoBehaviour
     private readonly ConcurrentDictionary<string, DateTime> connectedClients = new ConcurrentDictionary<string, DateTime>();
     private readonly ConcurrentQueue<DebugCommand> commandQueue = new ConcurrentQueue<DebugCommand>();
     private string currentCommand = "";
+    private int pendingCommands = 0; // 待处理命令数
 
     // 命令对象池
     private readonly SimpleObjectPool<DebugCommand> commandPool = new SimpleObjectPool<DebugCommand>(
@@ -260,6 +262,7 @@ public class DebugServer : MonoBehaviour
                     debugCommand.Command = command;
                     debugCommand.ClientInfo = clientEndPoint;
                     commandQueue.Enqueue(debugCommand);
+                    pendingCommands++;
                     OnCommandReceived?.Invoke(command);
                 }
             }
@@ -313,13 +316,20 @@ public class DebugServer : MonoBehaviour
 
     private void Update()
     {
-        // 在主线程中处理命令队列
-        while (commandQueue.TryDequeue(out DebugCommand command))
+        // 批量处理命令，避免每帧处理过多命令
+        int processedCount = 0;
+        while (commandQueue.TryDequeue(out DebugCommand command) && processedCount < maxCommandsPerFrame)
         {
             currentCommand = command.Command;
-            UpdateUI();
             ProcessCommand(command);
-            commandPool.Release(command); // 处理完后释放回对象池
+            commandPool.Release(command);
+            processedCount++;
+            pendingCommands--;
+        }
+
+        if (processedCount > 0)
+        {
+            UpdateUI();
         }
     }
 
@@ -327,7 +337,7 @@ public class DebugServer : MonoBehaviour
     {
         if (debugText != null)
         {
-            debugText.text = $"input: {currentCommand}";
+            debugText.text = $"input: {currentCommand}\nPending Commands: {pendingCommands}";
         }
     }
 
