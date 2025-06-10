@@ -13,8 +13,8 @@ Shader "Hidden/GeometryDensity/Blend"
             #pragma fragment frag
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            TEXTURE2D(_BaseTex);
-            SAMPLER(sampler_BaseTex);
+            TEXTURE2D(_BlitTexture);
+            SAMPLER(sampler_BlitTexture);
 
             struct Attributes
             {
@@ -38,7 +38,7 @@ Shader "Hidden/GeometryDensity/Blend"
 
             half4 frag(Varyings i) : SV_Target
             {
-                return SAMPLE_TEXTURE2D(_BaseTex, sampler_BaseTex, i.uv);
+                return SAMPLE_TEXTURE2D(_BlitTexture, sampler_BlitTexture, i.uv);
             }
             ENDHLSL
         }
