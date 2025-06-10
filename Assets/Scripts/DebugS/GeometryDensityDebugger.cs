@@ -8,8 +8,8 @@ public class GeometryDensityDebugger : ScriptableRendererFeature
     public class Settings
     {
         public float threshold = 0.5f;
-        public Color withinColor = new Color(0f, 1f, 0f, 0.2f);
-        public Color exceedColor = new Color(1f, 0f, 0f, 0.2f);
+        public Color withinColor = new Color(0f, 1f, 0f, 0.4f);
+        public Color exceedColor = new Color(1f, 0f, 0f, 0.4f);
     }
 
     class GeometryDensityPass : ScriptableRenderPass
@@ -33,6 +33,8 @@ public class GeometryDensityDebugger : ScriptableRendererFeature
         {
             var desc = renderingData.cameraData.cameraTargetDescriptor;
             desc.enableRandomWrite = true;
+            desc.msaaSamples = 1; // compute shaders cannot write to MSAA targets
+            desc.graphicsFormat = UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_UNorm;
             desc.depthBufferBits = 0;
             cmd.GetTemporaryRT(overlayID, desc, FilterMode.Point);
         }
