@@ -23,6 +23,7 @@ namespace DebugServer
     /// </summary>
     public class DebugServer : MonoBehaviour
     {
+        [SerializeField] private int framerate = 60;
 #if INCLUDE_LOCAL_NETWORK_DEBUG
         [SerializeField] private DebugConfig config;
         private DebugInvoker debugInvoker;
@@ -119,6 +120,7 @@ namespace DebugServer
 
         private void Start()
         {
+            Application.targetFrameRate = framerate;
             if (config.autoStart)
             {
                 StartServer();

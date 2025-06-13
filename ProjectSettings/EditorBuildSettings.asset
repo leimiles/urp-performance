@@ -6,6 +6,6 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
-    path: Assets/Art/TexDemo/Scenes/DebugServerTest01.unity
-    guid: 75f9b9461e92d7e4d928830e75c03865
+    path: Assets/Art/SpawnDemo/GeometryOcclude.unity
+    guid: 1b407fa1715a5b74e80f591f4ee6b397
   m_configObjects: {}
